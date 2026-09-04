@@ -1,0 +1,24 @@
+# build artifacts
+*.o
+*.apk
+*.ipk
+src/orouteragentd
+/build/
+/dist/
+/tmp/
+
+# state / test
+state.json
+*.tmp
+__pycache__/
+*.pyc
+
+# SDK is external
+sdk/
+
+# editor
+.vscode/
+*.swp
+# host test binaries
+test/test_protocol
+test/fuzz_protocol

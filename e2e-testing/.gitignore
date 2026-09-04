@@ -1,0 +1,3 @@
+artifacts/*.apk
+artifacts/orouteragent-config-smoke
+openwrt/ssh/id_ed25519*

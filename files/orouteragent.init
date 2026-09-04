@@ -1,0 +1,36 @@
+#!/bin/sh /etc/rc.common
+# orouteragent procd init script
+
+START=99
+STOP=10
+USE_PROCD=1
+PROG=/usr/sbin/orouteragentd
+
+start_service() {
+	local enabled
+
+	config_load orouteragent
+	config_get_bool enabled agent enabled 0
+	[ "$enabled" -eq 1 ] || {
+		logger -t orouteragent "not enabled (uci: orouteragent.agent.enabled=0)"
+		return 0
+	}
+
+	procd_open_instance
+	procd_set_param command "$PROG"
+	procd_set_param respawn \
+		${procd_respawn_threshold:-3600} \
+		${procd_respawn_timeout:-10} \
+		${procd_respawn_retry:-0}
+	# the daemon logs to syslog itself, so procd need not mirror stderr
+	procd_set_param pidfile /var/run/orouteragentd.pid
+	procd_close_instance
+}
+
+service_triggers() {
+	procd_add_reload_trigger "orouteragent"
+}
+
+reload_service() {
+	procd_send_signal orouteragent
+}
