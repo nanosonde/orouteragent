@@ -1,0 +1,168 @@
+# orouteragent end-to-end test environment
+#
+# The controller and emulated router are layer-2 adjacent on the lab
+# network. A separate isolated network connects the router's WAN port to
+# an ISP gateway that provides IPv4 DHCP.
+#
+#   omada-controller   a TP-L*nk Om*d* Software Controller
+#   openwrt            a full OpenWrt x86-64 VM (qemu + KVM) running the agent
+#   isp-gateway        an IPv4 DHCP server and local WAN next hop
+#
+# The VM is not a container process: it boots OpenWrt's own kernel, so
+# the agent runs against real procd, uci, ubus and netlink.
+
+name: orouteragent-e2e
+
+services:
+  controller:
+    # Controller image and port map used by the integration lab.
+    # Pin the major.minor line under test; 5.15 also works.
+    image: mbentley/omada-controller:6.2
+    container_name: ora-e2e-controller
+    hostname: omada-controller
+    restart: unless-stopped
+    environment:
+      TZ: Etc/UTC
+      MANAGE_HTTP_PORT: 8088
+      MANAGE_HTTPS_PORT: 8043
+      PORTAL_HTTP_PORT: 8088
+      PORTAL_HTTPS_PORT: 8843
+      PORT_DISCOVERY: 29810
+      PORT_ADOPT_V1: 29812
+      PORT_UPGRADE_V1: 29813
+      PORT_MANAGER_V1: 29811
+      PORT_MANAGER_V2: 29814
+      PORT_TRANSFER_V2: 29815
+      PORT_RTTY: 29816
+      PORT_DEVICE_MONITOR: 29817
+      SHOW_SERVER_LOGS: "true"
+      SHOW_MONGODB_LOGS: "false"
+    networks:
+      lab:
+        ipv4_address: ${E2E_CONTROLLER_IP:-172.28.0.10}
+    ports:
+      # Published for the operator's browser; the device talks to the
+      # controller over the lab network, not through these.
+      - "8088:8088/tcp"
+      - "8043:8043/tcp"
+      - "8843:8843/tcp"
+    volumes:
+      - controller-data:/opt/tplink/EAPController/data
+      - controller-work:/opt/tplink/EAPController/work
+      - controller-logs:/opt/tplink/EAPController/logs
+    healthcheck:
+      # the image provides this; it has no curl or wget of its own
+      test: ["CMD", "/healthcheck.sh"]
+      interval: 15s
+      timeout: 10s
+      retries: 40
+      start_period: 60s
+
+  isp-gateway:
+    build:
+      context: ./isp-gateway
+    image: orouteragent-e2e-isp-gateway:latest
+    container_name: ora-e2e-isp-gateway
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    network_mode: service:openwrt
+    environment:
+      ISP_ADDRESS: ${E2E_ISP_ADDRESS:-192.0.2.2}
+      ISP_PREFIX: ${E2E_WAN_PREFIX:-24}
+      WAN_INTERFACE: br1
+      WAN_CONTAINER_IP: ${E2E_OPENWRT_WAN_CONTAINER_IP:-192.0.2.3}
+      DHCP_START: ${E2E_WAN_DHCP_START:-192.0.2.100}
+      DHCP_END: ${E2E_WAN_DHCP_END:-192.0.2.199}
+      DHCP_NETMASK: ${E2E_WAN_NETMASK:-255.255.255.0}
+      DHCP_LEASE_TIME: ${E2E_WAN_LEASE_TIME:-12h}
+    depends_on:
+      - openwrt
+
+  openwrt:
+    build:
+      context: ./openwrt
+    image: orouteragent-e2e-openwrt:latest
+    container_name: ora-e2e-openwrt
+    hostname: openwrt-vm
+    restart: unless-stopped
+    # KVM, the tap/bridge setup and the loop mount used to seed the disk
+    # all need more than the default container privileges.
+    privileged: true
+    devices:
+      - /dev/kvm:/dev/kvm
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      OPENWRT_VERSION: ${E2E_OPENWRT_VERSION:-25.12.5}
+      VM_IP: ${E2E_OPENWRT_IP:-172.28.0.50}
+      VM_PREFIX: "24"
+      LAN_CONTAINER_IP: ${E2E_OPENWRT_CONTAINER_IP:-172.28.0.20}
+      LAN_GATEWAY: ${E2E_GATEWAY:-172.28.0.1}
+      WAN_CONTAINER_IP: ${E2E_OPENWRT_WAN_CONTAINER_IP:-192.0.2.3}
+      VM_WAN_MAC: ${E2E_OPENWRT_WAN_MAC:-52:54:00:12:34:57}
+      CONTROLLER_IP: ${E2E_CONTROLLER_IP:-172.28.0.10}
+      VM_MEMORY: ${E2E_VM_MEMORY:-512}
+      VM_CPUS: ${E2E_VM_CPUS:-2}
+      AGENT_MODEL: ${E2E_AGENT_MODEL:-ER707-M2}
+    networks:
+      lab:
+        ipv4_address: ${E2E_OPENWRT_CONTAINER_IP:-172.28.0.20}
+      wan:
+        ipv4_address: ${E2E_OPENWRT_WAN_CONTAINER_IP:-192.0.2.3}
+    ports:
+      # Serial console of the VM: `just e2e-console`
+      - "2323:2323/tcp"
+    volumes:
+      - openwrt-data:/data
+      # Packages dropped here are installed into the VM on first boot.
+      - ./artifacts:/artifacts:ro
+      - ./openwrt/ssh:/ssh:ro
+
+  proxy:
+    build:
+      context: ./proxy
+    image: orouteragent-e2e-proxy:latest
+    container_name: ora-e2e-proxy
+    restart: unless-stopped
+    environment:
+      CONTROLLER_HOST: ${E2E_CONTROLLER_IP:-172.28.0.10}
+      CONTROLLER_PORT: 8043
+      PROXY_BIND: 0.0.0.0
+      PROXY_PORT: 8090
+    networks:
+      - lab
+    ports:
+      - "8090:8090/tcp"
+    depends_on:
+      - controller
+
+networks:
+  lab:
+    name: orouteragent-e2e-lab
+    driver: bridge
+    ipam:
+      config:
+        # Container addresses are assigned statically above; the rest of
+        # the subnet is free for the VM.
+        - subnet: ${E2E_SUBNET:-172.28.0.0/24}
+          gateway: ${E2E_GATEWAY:-172.28.0.1}
+    driver_opts:
+      com.docker.network.bridge.name: ora-e2e0
+
+  wan:
+    name: orouteragent-e2e-wan
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: ${E2E_WAN_SUBNET:-192.0.2.0/24}
+          gateway: ${E2E_WAN_DOCKER_GATEWAY:-192.0.2.1}
+          ip_range: ${E2E_WAN_DOCKER_POOL:-192.0.2.224/27}
+    driver_opts:
+      com.docker.network.bridge.name: ora-e2e-wan
+
+volumes:
+  controller-data:
+  controller-work:
+  controller-logs:
+  openwrt-data:
